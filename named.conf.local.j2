@@ -1,0 +1,39 @@
+{# Master renders master zones with TSIG; Slave renders slave zones with TSIG #}
+{% if bind9_role == 'master' %}
+  {% for z in bind9_zones %}
+zone "{{ z.name }}" {
+    type master;
+    file "/etc/bind/{{ z.file }}";
+    allow-transfer { key {{ bind9_tsig_key_name }}; {{ bind9_slave_ips | join("; ") }}; };
+    also-notify { {% for ip in bind9_slave_ips %} {{ ip }} key {{ bind9_tsig_key_name }}; {% endfor %} };
+    notify yes;
+};
+  {% endfor %}
+
+  {% for z in bind9_reverse_zones | default([]) %}
+zone "{{ z.name }}" {
+    type master;
+    file "/etc/bind/{{ z.file }}";
+    allow-transfer { key {{ bind9_tsig_key_name }}; {{ bind9_slave_ips | join("; ") }}; };
+    also-notify { {% for ip in bind9_slave_ips %} {{ ip }} key {{ bind9_tsig_key_name }}; {% endfor %} };
+    notify yes;
+};
+  {% endfor %}
+{% elif bind9_role == 'slave' %}
+  {% for z in bind9_zones %}
+zone "{{ z.name }}" {
+    type slave;
+    masters { {{ bind9_master_ip }} key {{ bind9_tsig_key_name }}; };
+    file "/var/cache/bind/{{ z.file }}";
+};
+  {% endfor %}
+
+  {% for z in bind9_reverse_zones | default([]) %}
+zone "{{ z.name }}" {
+    type slave;
+    masters { {{ bind9_master_ip }} key {{ bind9_tsig_key_name }}; };
+    file "/var/cache/bind/{{ z.file }}";
+};
+  {% endfor %}
+{% endif %}
+

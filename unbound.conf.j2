@@ -1,0 +1,76 @@
+server:
+  # Listen only locally; AdGuard forwards here
+  interface: 127.0.0.1
+  port: 5335
+
+  username: "unbound"
+  chroot: ""
+  directory: "/etc/unbound"
+
+  do-ip4: yes
+  do-ip6: no
+  do-udp: yes
+  do-tcp: yes
+  edns-buffer-size: 1232
+
+  # Trust anchors / roots
+  root-hints: "/var/lib/unbound/root.hints"
+  auto-trust-anchor-file: "/var/lib/unbound/root.key"
+
+  # Access control (loopback + your LANs)
+  access-control: 127.0.0.1/32 allow
+{% for cidr in (allowed_cidrs | default(['10.0.0.0/8'])) %}
+  access-control: {{ cidr }} allow
+{% endfor %}
+
+  # Cache sizing / threads
+  rrset-cache-size: {{ unbound_rrset_cache | default('512m') }}
+  msg-cache-size:   {{ unbound_msg_cache   | default('256m') }}
+  num-threads:      {{ unbound_threads     | default(2) }}
+  neg-cache-size: 4M
+
+  # Security hardening
+  hide-identity: yes
+  hide-version:  yes
+  qname-minimisation: {{ (unbound_qname_minimisation | default(true)) | ternary('yes','no') }}
+  aggressive-nsec:    {{ (unbound_aggressive_nsec    | default(true)) | ternary('yes','no') }}
+  harden-glue:        {{ (unbound_harden_glue        | default(true)) | ternary('yes','no') }}
+  harden-dnssec-stripped: {{ (unbound_harden_dnssec_stripped | default(true)) | ternary('yes','no') }}
+  harden-below-nxdomain:  {{ (unbound_harden_below_nxdomain  | default(true)) | ternary('yes','no') }}
+  use-caps-for-id:        {{ (unbound_use_caps_for_id        | default(true)) | ternary('yes','no') }}
+  tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+  val-clean-additional: yes
+
+  # Performance / correctness
+  minimal-responses: {{ (unbound_minimal_responses | default(true)) | ternary('yes','no') }}
+  prefetch:          {{ (unbound_prefetch          | default(true)) | ternary('yes','no') }}
+  prefetch-key:      {{ (unbound_prefetch_key      | default(true)) | ternary('yes','no') }}
+
+  # Logging
+  verbosity: 1
+  logfile: ""
+
+# ---- Forward internal zones (TOP-LEVEL) ----
+{% if unbound_forward_zones is defined and unbound_forward_zones|length > 0 -%}
+{% for z in unbound_forward_zones -%}
+forward-zone:
+  name: "{{ z.name }}"
+  {% if z.forward_first is defined -%}
+  forward-first: {{ 'yes' if z.forward_first else 'no' }}
+  {%- endif %}
+  {%- if z.tls|default(false) %}
+  forward-tls-upstream: yes
+  {%- for a in z.addrs %}
+  forward-addr: {{ a }}@853
+  {%- endfor %}
+  {%- else %}
+  {%- for a in z.addrs %}
+  forward-addr: {{ a }}
+  {%- endfor %}
+  {%- endif %}
+{% endfor -%}
+{% endif %}
+
+# Optional: local includes
+# include: "/etc/unbound/local.d/*.conf"
+

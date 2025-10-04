@@ -1,0 +1,32 @@
+$TTL {{ item.ttl }}
+@   IN  SOA {{ item.soa.ns }} {{ item.soa.mail }} (
+        {{ item.soa.serial }}
+        {{ item.soa.refresh }}
+        {{ item.soa.retry }}
+        {{ item.soa.expire }}
+        {{ item.soa.minimum }} )
+
+{% for ns in item.ns | default([]) -%}
+@   IN  NS  {{ ns }}
+{% endfor %}
+
+{# A/AAAA records #}
+{% for rec in item.a_records | default([]) -%}
+{{ rec.name }}  IN  A   {{ rec.addr }}
+{% endfor %}
+
+{# CNAME records #}
+{% for rec in item.cname_records | default([]) -%}
+{{ rec.name }}  IN  CNAME   {{ rec.target }}
+{% endfor %}
+
+{# TXT records #}
+{% for rec in item.txt_records | default([]) -%}
+{{ rec.name }}  IN  TXT "{{ rec.value }}"
+{% endfor %}
+
+{# SRV records #}
+{% for rec in item.srv_records | default([]) -%}
+{{ rec.name }}  IN  SRV {{ rec.priority }} {{ rec.weight }} {{ rec.port }} {{ rec.target }}
+{% endfor %}
+

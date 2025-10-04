@@ -1,0 +1,325 @@
+---
+- name: AdGuard Home + Unbound resolver (local Unbound, AdGuard on :53)
+  hosts: dns_resolvers
+  become: true
+
+  vars:
+    _adguard_root_default:  "/opt/AdGuardHome"
+    _adguard_conf_default:  "/etc/adguard"
+    _adguard_user_default:  "adguard"
+    _adguard_group_default: "adguard"
+    _firewall_enable_default: true
+    _ui_open_default: false
+    _ui_port_default: 3000
+
+  pre_tasks:
+    - name: Ensure working resolv.conf at start
+      copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 1.1.1.1\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_service_mgr == "systemd"
+
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 30
+      ignore_errors: true
+
+    - name: Resolve config vars from inventory or defaults
+      ansible.builtin.set_fact:
+        adguard_root_resolved:   "{{ adguard_root   | default(_adguard_root_default) }}"
+        adguard_conf_resolved:   "{{ adguard_conf   | default(_adguard_conf_default) }}"
+        adguard_user_resolved:   "{{ adguard_user   | default(_adguard_user_default) }}"
+        adguard_group_resolved:  "{{ adguard_group  | default(_adguard_group_default) }}"
+        firewall_enable_resolved: "{{ firewall_enable | default(_firewall_enable_default) }}"
+        adguard_ui_open_resolved: "{{ adguard_ui_open | default(_ui_open_default) }}"
+        adguard_ui_port_resolved: "{{ adguard_ui_port | default(_ui_port_default) }}"
+
+    - name: Seed working vars before unarchive/autodetect
+      ansible.builtin.set_fact:
+        adguard_workdir: "{{ adguard_root_resolved }}"
+        adguard_bin: "{{ adguard_root_resolved }}/AdGuardHome"
+
+  tasks:
+    - name: Install resolver prerequisites
+      ansible.builtin.apt:
+        name:
+          - unbound
+          - dns-root-data
+          - ca-certificates
+          - curl
+          - tar
+          - nftables
+          - libcap2-bin
+        state: present
+        update_cache: yes
+        lock_timeout: 300
+      register: apt_result
+      retries: 1
+      delay: 10
+      until: apt_result is succeeded
+      ignore_errors: true
+
+    - name: Ensure directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /var/lib/unbound
+        - /etc/unbound
+        - "{{ adguard_conf_resolved }}"
+        - "{{ adguard_root_resolved }}"
+        - /etc/nftables.d
+        - "{{ adguard_conf_resolved }}/tls"
+
+    - name: Ensure Unbound log dir exists
+      file:
+        path: /var/log/unbound
+        state: directory
+        owner: unbound
+        group: unbound
+        mode: "0755"
+
+    - name: Seed root.hints from local package (no network needed)
+      copy:
+        src: /usr/share/dns/root.hints
+        dest: /var/lib/unbound/root.hints
+        remote_src: true
+        mode: "0644"
+
+    - name: Ensure Unbound state dir is owned by unbound recursively
+      file:
+        path: /var/lib/unbound
+        state: directory
+        owner: unbound
+        group: unbound
+        mode: "0750"
+        recurse: true
+
+    - name: Initialize/refresh DNSSEC trust anchor
+      command: unbound-anchor -a /var/lib/unbound/root.key
+      args:
+        creates: /var/lib/unbound/root.key
+
+    - name: Template Unbound config (listens on 127.0.0.1@5335)
+      template:
+        src: "{{ playbook_dir }}/templates/unbound.conf.j2"
+        dest: /etc/unbound/unbound.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart unbound
+
+    - name: Enable & start Unbound
+      service:
+        name: unbound
+        state: started
+        enabled: true
+
+    - name: Stop & disable systemd-resolved (if present) AFTER Unbound is up
+      service:
+        name: systemd-resolved
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Ensure working resolv.conf for bootstrap after stopping resolved
+      copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 1.1.1.1\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_service_mgr == "systemd"
+
+    # ------------ AdGuard Home ------------
+    - name: Ensure adguard group exists
+      group:
+        name: "{{ adguard_group }}"
+        system: true
+
+    - name: Create adguard system user
+      user:
+        name: "{{ adguard_user }}"
+        group: "{{ adguard_group }}"
+        system: yes
+        create_home: no
+
+    - name: Download AdGuard Home archive
+      get_url:
+        url: "https://github.com/AdguardTeam/AdGuardHome/releases/download/{{ adguard_version }}/AdGuardHome_linux_amd64.tar.gz"
+        dest: /tmp/AdGuardHome_linux_amd64.tar.gz
+        mode: "0644"
+      ignore_errors: true
+      
+
+    - name: Ensure AdGuard work and config dirs are owned by adguard
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ adguard_user_resolved }}"
+        group: "{{ adguard_group_resolved }}"
+        mode: "0755"
+        recurse: true
+      loop:
+        - "{{ adguard_workdir }}"
+        - "{{ adguard_conf_resolved }}"
+
+    - name: Ensure AdGuard logs dir exists and is writable
+      ansible.builtin.file:
+        path: "{{ adguard_workdir }}/logs"
+        state: directory
+        owner: "{{ adguard_user | default('adguard') }}"
+        group: "{{ adguard_group | default('adguard') }}"
+        mode: "0755"
+
+    - name: Unarchive AdGuard Home (flatten to {{ adguard_root }})
+      ansible.builtin.unarchive:
+        src: /tmp/AdGuardHome_linux_amd64.tar.gz
+        dest: "{{ adguard_root_resolved }}"                 # e.g., /opt/AdGuardHome
+        remote_src: true
+        extra_opts:
+          - --no-same-owner
+          - --strip-components=1                   # <— FLATTEN the top-level dir
+
+    # (optional but helpful) ensure top-level dir exists
+    - name: Ensure {{ adguard_root | default('/opt/AdGuardHome') }} exists
+      ansible.builtin.file:
+        path: "{{ adguard_root | default('/opt/AdGuardHome') }}"
+        state: directory
+        mode: "0755"
+
+    # Find the AdGuardHome binary anywhere under adguard_root (depth limited)
+    - name: Locate AdGuardHome binary
+      ansible.builtin.shell: |
+        set -o pipefail
+        find "{{ adguard_root_resolved }}" \
+          -maxdepth 3 -type f -name AdGuardHome | head -n1
+      args:
+        executable: /bin/bash
+      register: adg_find
+      changed_when: false
+      failed_when: adg_find.stdout | trim == ""
+
+    - name: Set AdGuard paths (bin/workdir)
+      ansible.builtin.set_fact:
+        adguard_bin: "{{ adg_find.stdout | trim }}"
+        adguard_workdir: "{{ adguard_root_resolved }}"
+
+    - name: Ensure AdGuard binary is executable
+      ansible.builtin.file:
+        path: "{{ adguard_bin }}"
+        mode: "0755"
+
+    - name: Grant low-port bind capability to AdGuard binary (best-effort)
+      ansible.builtin.shell: |
+        command -v setcap >/dev/null 2>&1 && setcap cap_net_bind_service=+ep "{{ adguard_bin }}" || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
+    - name: Template AdGuard Home config
+      template:
+        src: "{{ playbook_dir }}/templates/AdGuardHome.yaml.j2"
+        dest: "{{ adguard_conf_resolved }}/AdGuardHome.yaml"
+        owner: "{{ adguard_user_resolved }}"
+        group: "{{ adguard_group_resolved }}"
+        mode: "0660"
+      notify: Restart adguard
+
+    - name: Install systemd unit for AdGuard Home (uses autodetected paths)
+      template:
+        src: "{{ playbook_dir }}/templates/adguardhome.service.j2"
+        dest: /etc/systemd/system/adguardhome.service
+        mode: "0644"
+      notify:
+        - Daemon reload
+        - Restart adguard
+
+    - name: Enable & start AdGuard Home
+      service:
+        name: adguardhome
+        state: started
+        enabled: true
+
+    - name: Wait for AdGuard DNS on localhost:53
+      wait_for:
+        host: 127.0.0.1
+        port: 53
+        timeout: 30
+
+    - name: Point resolv.conf to localhost (now that AdGuard is up)
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 127.0.0.1
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ------------ Optional firewall ------------
+    - name: Minimal nftables rules for DNS (LAN only)
+      when: firewall_enable_resolved
+      copy:
+        dest: /etc/nftables.d/dns-resolver.nft
+        mode: "0644"
+        content: |
+          table inet dns_resolver {
+            chain input {
+              type filter hook input priority filter; policy drop;
+              ct state established,related accept
+              iif lo accept
+              ip saddr {10.10.40.0/24, 10.99.101.0/24} tcp dport 22 accept
+              ip saddr {10.10.40.0/24, 10.99.101.0/24} tcp dport 3000 accept
+              ip saddr 10.0.0.0/8 tcp dport {53,853} accept
+              ip saddr 10.0.0.0/8 udp dport 53 accept
+            }
+          }
+
+    - name: Ensure /etc/nftables.conf includes our dns-resolver rules
+      when: firewall_enable_resolved
+      lineinfile:
+        path: /etc/nftables.conf
+        create: yes
+        mode: "0644"
+        line: 'include "/etc/nftables.d/dns-resolver.nft"'
+        insertafter: EOF
+
+    - name: Enable & (re)start nftables
+      when: firewall_enable_resolved
+      service:
+        name: nftables
+        state: restarted
+        enabled: true
+
+  handlers:
+    - name: Restart unbound
+      service:
+        name: unbound
+        state: restarted
+
+    - name: Daemon reload
+      systemd:
+        daemon_reload: true
+
+    - name: Restart adguard
+      ansible.builtin.service:
+        name: adguardhome
+        state: restarted
+        daemon_reload: true
+      register: adgh_restart
+      failed_when: adgh_restart is failed
+      notify: Dump adguard logs
+
+    - name: Dump adguard logs
+      ansible.builtin.command: journalctl -u adguardhome -b --no-pager -n 120
+      register: adgh_logs
+      changed_when: false
+      when: adgh_restart is failed

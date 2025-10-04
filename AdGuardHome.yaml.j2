@@ -1,0 +1,86 @@
+# --- UI / service ---
+# derive ip
+{% set svc_subnet_prefix = adguard_ui_subnet_prefix|default('10.10.50.') %}
+{% set svc_ips = (ansible_all_ipv4_addresses|select('match','^' ~ svc_subnet_prefix|regex_escape)) | list %}
+{% set ui_bind = (adguard_ui_bind_host | default(svc_ips[0] if svc_ips|length > 0 else None, true) | default(ansible_default_ipv4.address, true)) %}
+bind_host: "{{ ui_bind }}"
+bind_port: {{ adguard_ui_port|default(3000) }}
+beta_bind_port: 0
+users: []
+auth_attempts: 5
+block_auth_min: 15
+http_proxy: ""
+language: en
+
+# --- DNS ---
+dns:
+  bind_hosts:
+{% for h in (adguard_dns_bind_hosts|default(['0.0.0.0'])) %}
+    - "{{ h }}"
+{% endfor %}
+  port: 53
+  protection_enabled: true
+
+  upstream_dns:
+{% if adguard_domain_forwards is defined %}
+{% for item in adguard_domain_forwards %}
+{% for upstream in item.upstreams %}
+# send to bind9
+    - "[/{{ item.domain }}/]{{ upstream }}"
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% set ups = (adguard_upstreams if adguard_upstreams is defined else ['127.0.0.1:5335']) | list %}
+{% for u in ups | flatten %}
+    - "{{ u }}"
+{% endfor %}
+
+  bootstrap_dns:
+{% set boots = (adguard_bootstrap_dns if adguard_bootstrap_dns is defined else ['127.0.0.1:5335']) | list %}
+{% for b in boots | flatten %}
+    "{{ b }}"
+{% endfor %}
+
+  upstream_mode: load_balance
+  edns_client_subnet:
+    enabled: false
+
+  # --- Blocking behaviour ---
+  blocking_mode: nxdomain          # options: default, refused, nxdomain, null_ip, custom_ip
+  blocked_response_ttl: 60         # cache time for blocked answers 
+
+
+# --- Filtering (enabled by default) ---
+filtering_enabled: true
+filter_update_interval: 24    # hours; pick a cadence you like
+
+filters:
+{% for f in adguard_filters %}
+  - id: {{ loop.index }}                   # simple stable ids per render
+    name: "{{ f.name }}"
+    enabled: {{ f.enabled | default(true) | lower }}
+    url: "{{ f.url }}"
+{% endfor %}
+
+# Optional allow/deny convenience lists you keep in group_vars
+whitelist:
+{% for w in (adguard_whitelist | default([])) %}
+  - "{{ w }}"
+{% endfor %}
+
+# If you want your own hard blocks:
+blocked_hosts:
+{% for d in (adguard_denylist | default([])) %}
+  - "{{ d }}"
+{% endfor %}
+
+
+# --- TLS (off by default) ---
+tls:
+  enabled: {{ adguard_tls_enable|default(false)|lower }}
+{% if adguard_tls_enable|default(false) %}
+  server_name: "{{ adguard_tls_server_name }}"
+  certificate_chain: "{{ adguard_tls_cert }}"
+  private_key: "{{ adguard_tls_key }}"
+{% endif %}
+

@@ -1,0 +1,28 @@
+options {
+    directory "/var/cache/bind";
+
+    {% if bind9_listen_ipv4 | default([]) | length > 0 -%}
+    listen-on { {{ bind9_listen_ipv4 | join('; ') }}; };
+    {%- else -%}
+    listen-on { any; };
+    {%- endif %}
+
+    {% if bind9_listen_ipv6 | default([]) | length > 0 -%}
+    listen-on-v6 { {{ bind9_listen_ipv6 | join('; ') }}; };
+    {%- else -%}
+    listen-on-v6 { none; };
+    {%- endif %}
+
+    allow-query { {{ bind9_allow_query | join('; ') }}; };
+
+    recursion {{ 'yes' if bind9_recursion | bool else 'no' }};
+
+    // good defaults for auth servers
+    dnssec-validation auto;
+    auth-nxdomain no;
+    minimal-responses yes;
+    rate-limit {
+        responses-per-second 200;   // optional soft protection
+    };
+};
+
