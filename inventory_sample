@@ -1,0 +1,9 @@
+# example use case from my homelab dns on vlan50
+[dns_resolvers]
+dnsr01 ansible_host=10.10.50.100 ansible_user=debian ansible_become=true
+dnsr02 ansible_host=10.10.50.101 ansible_user=debian ansible_become=true
+
+[dns_authoritative]
+dnsa01 ansible_host=10.10.50.110 bind9_role=master bind9_ip=10.10.50.110
+dnsa02 ansible_host=10.10.50.111 bind9_role=slave  bind9_ip=10.10.50.111
+
